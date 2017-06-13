@@ -1,0 +1,8 @@
+serverConfs:
+  - serverURL: <makepadon rails server url>
+    streamingServerURL: <makepadon streaming(websocket) server url>
+    clientID:  <oauth client id>
+    clientSecret: <oauth client secret>
+    account: <account>
+    password: <password>
+slackWebHookURL: <slack webhook url>

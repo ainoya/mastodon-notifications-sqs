@@ -1,52 +1,52 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io/ioutil"
 	"log"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
-	yaml "gopkg.in/yaml.v2"
+	"fmt"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/sqs"
-	"github.com/mattn/go-mastodon"
+	"golang.org/x/net/html"
+
+	mastodon "github.com/ainoya/go-mastodon"
+	"github.com/bluele/slack"
+
+	yaml "gopkg.in/yaml.v2"
 )
 
 const settingFile = "./setting.yml"
 
-var queueURL string
+var wh *slack.WebHook
+var s Settings
 
 // Settings from yaml
 type Settings struct {
-	AwsRegion   string       `yaml:"awsRegion"`
-	QueueURL    string       `yaml:"queueURL"`
-	ServerConfs []ServerConf `yaml:"serverConfs"`
+	ServerConfs     []ServerConf `yaml:"serverConfs"`
+	SlackWebHookURL string       `yaml:"slackWebHookURL"`
 }
 
 // ServerConf mastodon server's setting
 type ServerConf struct {
-	ServerName   string `yaml:"serverName"`
-	ServerURL    string `yaml:"serverURL"`
-	ClientID     string `yaml:"clientID"`
-	ClientSecret string `yaml:"clientSecret"`
-	Account      string `yaml:"account"`
-	Password     string `yaml:"password"`
+	ServerURL          string `yaml:"serverURL"`
+	StreamingServerURL string `yaml:"streamingServerURL"`
+	ClientID           string `yaml:"clientID"`
+	ClientSecret       string `yaml:"clientSecret"`
+	Account            string `yaml:"account"`
+	Password           string `yaml:"password"`
 }
 
 // notification struct
 type notification struct {
-	nType       string
 	displayName string
 	content     string
-	serverName  string
+	url         string
 }
-
-// SQS connection
-var svc *sqs.SQS
 
 func main() {
 	// load setting file
@@ -54,22 +54,12 @@ func main() {
 	if err != nil {
 		return
 	}
-	var s Settings
 	err = yaml.Unmarshal(buf, &s)
 	if err != nil {
 		panic(err)
 	}
-	queueURL = s.QueueURL
 
-	// SQS set up
-	sess, err := session.NewSession(&aws.Config{
-		Region: aws.String(s.AwsRegion)},
-	)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	svc = sqs.New(sess)
+	wh = slack.NewWebHook(s.SlackWebHookURL)
 
 	wg := &sync.WaitGroup{}
 	for i := range s.ServerConfs {
@@ -84,9 +74,10 @@ func main() {
 
 func connect(conf ServerConf) {
 	c := mastodon.NewClient(&mastodon.Config{
-		Server:       conf.ServerURL,
-		ClientID:     conf.ClientID,
-		ClientSecret: conf.ClientSecret,
+		Server:          conf.ServerURL,
+		StreamingServer: conf.StreamingServerURL,
+		ClientID:        conf.ClientID,
+		ClientSecret:    conf.ClientSecret,
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -94,77 +85,86 @@ func connect(conf ServerConf) {
 
 	err := c.Authenticate(ctx, conf.Account, conf.Password)
 	if err != nil {
+		log.Println("authenticate")
 		log.Fatal(err)
 	}
 
 	wsc := c.NewWSClient()
 
-	q, err := wsc.StreamingWSUser(context.Background())
+	q, err := wsc.StreamingWSPublic(context.Background(), false)
 	if err != nil {
+		log.Println("streamingwsuser")
 		log.Fatal(err)
 	}
 
-	log.Println("start - ", conf.ServerName)
+	//	log.Println("start")
 
 	cnl := make(chan bool)
-	go watchStream(q, conf.ServerName, cnl)
+	go watchStream(q, cnl)
 
 	select {
 	case <-cnl:
-		log.Println("channel down and restart")
+		// log.Println("channel down and restart")
 	}
 	connect(conf)
 }
 
-func watchStream(q chan mastodon.Event, serverName string, c chan bool) {
+func watchStream(q chan mastodon.Event, c chan bool) {
 	defer func() { c <- true }()
 	// get event stream
 	for e := range q {
-		if t, ok := e.(*mastodon.NotificationEvent); ok {
-			log.Println(t.Notification.Type)
-			log.Println(t.Notification.Account.DisplayName)
-			mentionBody := ""
-			if t.Notification.Type == "mention" {
-				mentionBody = removeTag(t.Notification.Status.Content)
-			}
-			log.Println(mentionBody)
+		if t, ok := e.(*mastodon.UpdateEvent); ok {
 			pushMessage(notification{
-				nType:       t.Notification.Type,
-				displayName: t.Notification.Account.DisplayName,
-				content:     mentionBody,
-				serverName:  serverName,
+				displayName: t.Status.Account.Username,
+				content:     textContent(t.Status.Content),
+				url:         t.Status.URL,
 			})
 		}
 	}
 }
 
+func textContent(s string) string {
+	doc, err := html.Parse(strings.NewReader(s))
+	if err != nil {
+		return s
+	}
+	var buf bytes.Buffer
+
+	var extractText func(node *html.Node, w *bytes.Buffer)
+	extractText = func(node *html.Node, w *bytes.Buffer) {
+		if node.Type == html.TextNode {
+			data := strings.Trim(node.Data, "\r\n")
+			if data != "" {
+				w.WriteString(data)
+			}
+		}
+		for c := node.FirstChild; c != nil; c = c.NextSibling {
+			extractText(c, w)
+		}
+		if node.Type == html.ElementNode {
+			name := strings.ToLower(node.Data)
+			if name == "br" {
+				w.WriteString("\n")
+			}
+		}
+	}
+	extractText(doc, &buf)
+	return buf.String()
+}
+
 // push a message to AWS SQS
 func pushMessage(n notification) {
-	pushContent := "[" + n.serverName + "]"
-	switch n.nType {
-	case "follow":
-		pushContent += n.displayName + "さんにフォローされた"
-	case "favourite":
-		pushContent += n.displayName + "さんにお気に入りされた"
-	case "reblog":
-		pushContent += n.displayName + "さんにブーストされた"
-	case "mention":
-		pushContent += n.displayName + "さんから：" + n.content
-	}
-
-	params := &sqs.SendMessageInput{
-		MessageBody:  aws.String(pushContent),
-		QueueUrl:     aws.String(queueURL),
-		DelaySeconds: aws.Int64(1),
-	}
-
-	// send
-	sqsRes, err := svc.SendMessage(params)
-	if err != nil {
-		log.Fatal("sqs send error : ", err.Error())
-	}
-
-	log.Println("send : ", *sqsRes.MessageId)
+	wh.PostMessage(&slack.WebHookPostPayload{
+		IconEmoji: ":elephant:",
+		Attachments: []*slack.Attachment{
+			{
+				AuthorName: fmt.Sprintf("@%s", n.displayName),
+				AuthorLink: fmt.Sprintf("%s/@%s", s.ServerConfs[0].ServerURL, n.displayName),
+				Text:       n.content,
+			},
+		},
+		Username: "makepadon",
+	})
 }
 
 // remove xml tags

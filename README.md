@@ -1,26 +1,14 @@
-mastodon-notifications-sqs
-
-* Still temporary placement *
-
-# Function
-Monitor mastodon notification Streaming and push to AWS SQS.
-Multiple instances are supported.
-
-# setting.yml
-Place setting.yml in the same hierarchy.
-Multiple serverConfs can be specified in the list.
+Mastodon slack integration
 
 ```yml
-awsRegion: [AWS Region]
-queueURL: [SQS endpoint URL]
-
 serverConfs:
-  - serverName: [name of instance - for display at notification]
-    serverURL: [Instance URL - no trailing slash]
-    clientID: [Mustdon client ID - described later]
-    clientSecret: [Mastodon client secret key - described later]
-    account: [Mastodon account name]
-    password: [Mastodon password]
+  - serverURL: <mastodon rails server url>
+    streamingServerURL: <mastodon streaming(websocket) server url>
+    clientID:  <oauth client id>
+    clientSecret: <oauth client secret>
+    account: <account>
+    password: <password>
+slackWebHookURL: <slack webhook url>
 ```
 
 # Preparation for using Mastodon API
