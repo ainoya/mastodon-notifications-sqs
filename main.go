@@ -163,7 +163,6 @@ func pushMessage(n notification) {
 				Text:       n.content,
 			},
 		},
-		Username: "makepadon",
 	})
 }
 
